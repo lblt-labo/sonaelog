@@ -195,9 +195,11 @@ var DEFAULT_REMINDERS = [
   { id:'r-monthly', label:'毎月の点検日', date:'01', monthly:true, enabled:true, builtin:true }
 ];
 
+var DEFAULT_PIN = '0000';
+
 function defaultData(){
   return {
-    pin: null,
+    pin: DEFAULT_PIN,
     cards: [],
     reminders: DEFAULT_REMINDERS.slice(),
     createdAt: todayISO()
@@ -212,6 +214,7 @@ function loadData(){
     for(var k in base){ merged[k] = (k in d) ? d[k] : base[k]; }
     if(!merged.reminders || !merged.reminders.length) merged.reminders = DEFAULT_REMINDERS.slice();
     if(!Array.isArray(merged.cards)) merged.cards = [];
+    if(!merged.pin || typeof merged.pin !== 'string' || merged.pin.length!==4) merged.pin = DEFAULT_PIN;
     return merged;
   }catch(e){ return defaultData(); }
 }
@@ -221,11 +224,11 @@ function saveData(){ try{ storage.set(STORE_KEY, state.data); }catch(e){} }
 var state = {
   data: loadData(),
   unlocked: false,
-  setupStage: null,   // 'setup1' | 'setup2' | null
-  firstPin: '',
   pinInput: '',
   pinError: '',
   changingPin: false,
+  changePinStage: null,   // 'current' | 'new1' | 'new2' | null
+  changePinNewVal: '',
   tab: 'home',
   openCardId: null,
   editingNameCardId: null,
@@ -363,22 +366,6 @@ function renderPinPad(){
   return html;
 }
 function renderLockScreen(){
-  var stage = state.setupStage;
-  if(state.data.pin === null && !stage) stage = state.setupStage = 'setup1';
-  if(stage === 'setup1' || stage === 'setup2'){
-    return (
-      '<div class="flex flex-col items-center justify-center safe-top safe-bottom" style="min-height:100vh;padding:24px;">' +
-        '<div class="text-5xl mb-2">🛡️</div>' +
-        '<h1 class="text-2xl font-bold mb-1">ソナエログ</h1>' +
-        '<p class="text-sm opacity-60 mb-6">そなえあればうれしいアプリ</p>' +
-        '<div class="card p-6 w-full max-w-sm">' +
-          '<p class="font-bold text-center mb-4">' + (stage==='setup1' ? '合言葉となる4つの数字を決めてください' : 'もう一度、同じ数字を入力してください') + '</p>' +
-          (state.pinError ? '<p class="pin-error text-center mb-2">'+escapeHtml(state.pinError)+'</p>' : '') +
-          renderPinDots() + renderPinPad() +
-        '</div>' +
-      '</div>'
-    );
-  }
   return (
     '<div class="flex flex-col items-center justify-center safe-top safe-bottom" style="min-height:100vh;padding:24px;">' +
       '<div class="text-5xl mb-2">🔒</div>' +
@@ -387,15 +374,22 @@ function renderLockScreen(){
         '<p class="font-bold text-center mb-4">合言葉の数字を入力してください</p>' +
         (state.pinError ? '<p class="pin-error text-center mb-2">'+escapeHtml(state.pinError)+'</p>' : '') +
         renderPinDots() + renderPinPad() +
+        '<p class="text-xs opacity-50 text-center mt-3">※初期パスコード：0000</p>' +
       '</div>' +
     '</div>'
   );
 }
 function renderChangePinScreen(){
+  var stage = state.changePinStage;
+  var title = '新しい合言葉を入力してください';
+  if(stage === 'current') title = '現在のパスコードを入力してください';
+  else if(stage === 'new1') title = '新しいパスコード（4桁）を入力してください';
+  else if(stage === 'new2') title = 'もう一度、同じパスコードを入力してください';
   return (
     '<div class="flex flex-col items-center justify-center safe-top safe-bottom" style="min-height:100vh;padding:24px;">' +
       '<div class="card p-6 w-full max-w-sm">' +
-        '<p class="font-bold text-center mb-4">新しい合言葉を入力してください</p>' +
+        '<p class="font-bold text-center mb-4">'+escapeHtml(title)+'</p>' +
+        (state.pinError ? '<p class="pin-error text-center mb-2">'+escapeHtml(state.pinError)+'</p>' : '') +
         renderPinDots() + renderPinPad() +
         '<button class="btn btn-ghost w-full mt-3 press" data-action="cancel-change-pin">やめる</button>' +
       '</div>' +
@@ -849,36 +843,41 @@ function handlePinDigit(d){
     var entered = state.pinInput;
     setTimeout(function(){
       if(state.changingPin){
-        state.data.pin = entered; saveData();
-        state.changingPin = false; state.pinInput='';
-        setToast('合言葉を変更しました');
-        render();
-        return;
+        if(state.changePinStage==='current'){
+          if(entered === state.data.pin){
+            state.changePinStage='new1'; state.pinError=''; state.pinInput='';
+          } else {
+            state.pinError = '現在のパスコードが違います'; state.pinInput='';
+          }
+          render();
+          return;
+        }
+        if(state.changePinStage==='new1'){
+          state.changePinNewVal = entered; state.changePinStage='new2'; state.pinError=''; state.pinInput='';
+          render();
+          return;
+        }
+        if(state.changePinStage==='new2'){
+          if(entered === state.changePinNewVal){
+            state.data.pin = entered; saveData();
+            state.changingPin = false; state.changePinStage=null; state.changePinNewVal=''; state.pinInput=''; state.pinError='';
+            setToast('合言葉を変更しました');
+          } else {
+            state.pinError = 'パスコードが一致しません。最初からやり直してください';
+            state.changePinStage='new1'; state.changePinNewVal=''; state.pinInput='';
+          }
+          render();
+          return;
+        }
       }
       if(!state.unlocked){
-        if(state.setupStage==='setup1'){
-          state.firstPin = entered; state.setupStage='setup2'; state.pinError=''; state.pinInput='';
+        if(entered === state.data.pin){
+          state.unlocked = true; state.pinInput=''; state.pinError='';
+          checkReminders();
           render();
-        } else if(state.setupStage==='setup2'){
-          if(entered===state.firstPin){
-            state.data.pin = entered; saveData();
-            state.unlocked = true; state.pinInput=''; state.setupStage=null;
-            checkReminders();
-            render();
-          } else {
-            state.pinError = '数字が違います。最初からやり直してください';
-            state.setupStage='setup1'; state.pinInput='';
-            render();
-          }
         } else {
-          if(entered === state.data.pin){
-            state.unlocked = true; state.pinInput=''; state.pinError='';
-            checkReminders();
-            render();
-          } else {
-            state.pinError = '数字が違います'; state.pinInput='';
-            render();
-          }
+          state.pinError = '数字が違います'; state.pinInput='';
+          render();
         }
       }
     }, 120);
@@ -996,12 +995,18 @@ function attachEvents(){
       switch(action){
         case 'pin-digit': handlePinDigit(el.getAttribute('data-digit')); break;
         case 'pin-backspace': handlePinBackspace(); break;
-        case 'cancel-change-pin': state.changingPin=false; state.pinInput=''; render(); break;
-        case 'start-change-pin': state.changingPin=true; state.pinInput=''; render(); break;
+        case 'cancel-change-pin':
+          state.changingPin=false; state.changePinStage=null; state.changePinNewVal=''; state.pinInput=''; state.pinError='';
+          render();
+          break;
+        case 'start-change-pin':
+          state.changingPin=true; state.changePinStage='current'; state.changePinNewVal=''; state.pinInput=''; state.pinError='';
+          render();
+          break;
         case 'reset-pin':
-          if(confirm('合言葉をリセットします。次回起動時に新しく設定できます。よろしいですか？')){
-            state.data.pin = null; saveData();
-            try{ location.reload(); }catch(err){ state.unlocked=false; state.setupStage='setup1'; render(); }
+          if(confirm('パスコードを初期値「0000」にリセットします。よろしいですか？')){
+            state.data.pin = DEFAULT_PIN; saveData();
+            try{ location.reload(); }catch(err){ state.unlocked=false; state.pinInput=''; state.pinError=''; render(); }
           }
           break;
         case 'switch-tab':
