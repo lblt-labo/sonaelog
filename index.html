@@ -178,8 +178,8 @@ function escapeHtml(s){
 
 var HOUSE_CHECKLIST_DEFAULT = ['家具の固定','ガラスの飛散防止','脱出用ハンマーの設置','非常持ち出し袋の準備','消火器の設置'];
 var CAR_CHECKLIST_DEFAULT = ['ガソリン半分以上をキープ','車内に飲料水を常備','非常用工具の積み込み','任意保険の証券を確認'];
-var HOUSE_SHOT_GUIDE = ['建物 前から全体','建物 右から全体','建物 左から全体','建物 後ろから全体','こわれた場所（近づいて）','部屋の中のようす','水回り（台所・お風呂）'];
-var CAR_SHOT_GUIDE = ['車 遠くから全体（タイヤが写るように）','水につかった高さがわかる写真','車内の足元（ぬれ具合）','メーターパネル','ナンバープレート'];
+var HOUSE_MISSION_STEPS = ['建物全体（引きの全景）','部屋全体（室内）','主要な家電・家具','傾き・ひび割れ（壁・柱）'];
+var CAR_MISSION_STEPS = ['車両全体（斜め前・斜め後）','ナンバープレート（車両特定用）','タイヤ・足回り','車内・オドメーター（走行距離）'];
 var PHONE_LIST = [
   { label:'警察', num:'110', icon:'🚓', note:'事件・事故のとき' },
   { label:'消防・救急', num:'119', icon:'🚒', note:'火事・急病のとき' },
@@ -214,6 +214,7 @@ function loadData(){
     for(var k in base){ merged[k] = (k in d) ? d[k] : base[k]; }
     if(!merged.reminders || !merged.reminders.length) merged.reminders = DEFAULT_REMINDERS.slice();
     if(!Array.isArray(merged.cards)) merged.cards = [];
+    merged.cards = merged.cards.map(function(c){ try{ return normalizeCard(c); }catch(e){ return c; } });
     if(!merged.pin || typeof merged.pin !== 'string' || merged.pin.length!==4) merged.pin = DEFAULT_PIN;
     return merged;
   }catch(e){ return defaultData(); }
@@ -285,14 +286,32 @@ function compressImage(file, maxWidth, callback){
 }
 
 /* ========================= カード操作 ========================= */
+function makeMissions(type){
+  var steps = type==='house' ? HOUSE_MISSION_STEPS : CAR_MISSION_STEPS;
+  return steps.map(function(label){ return { id: uid(), label: label, beforePhoto: null, afterPhoto: null }; });
+}
+function normalizeCard(card){
+  try{
+    if(!card.checklist || !Array.isArray(card.checklist)) card.checklist = [];
+    if(!card.missions || !Array.isArray(card.missions) || card.missions.length===0){
+      card.missions = makeMissions(card.type==='car' ? 'car' : 'house');
+    }
+  }catch(e){}
+  return card;
+}
 function findCard(id){
   for(var i=0;i<state.data.cards.length;i++){ if(state.data.cards[i].id===id) return state.data.cards[i]; }
+  return null;
+}
+function findMission(card, missionId){
+  if(!card) return null;
+  for(var i=0;i<card.missions.length;i++){ if(card.missions[i].id===missionId) return card.missions[i]; }
   return null;
 }
 function addCard(type){
   var defaults = type==='house' ? HOUSE_CHECKLIST_DEFAULT : CAR_CHECKLIST_DEFAULT;
   var checklist = defaults.map(function(label){ return { id: uid(), label: label, checked:false }; });
-  var card = { id: uid(), type: type, name: type==='house' ? '我が家' : 'マイカー', checklist: checklist, beforePhotos: [], afterPhotos: [] };
+  var card = { id: uid(), type: type, name: type==='house' ? '我が家' : 'マイカー', checklist: checklist, missions: makeMissions(type) };
   state.data.cards.push(card);
   saveData();
   render();
@@ -466,12 +485,12 @@ function renderModal(id, title, innerHtml){
   );
 }
 
-/* ---------- ホーム（平時モード） ---------- */
-function renderThumb(photo, removeAction, cardId, photoId){
+/* ---------- ホーム（ふだんの記録） ---------- */
+function renderThumb(photo, removeAction, cardId, missionId, kind){
   return (
     '<div class="thumb">' +
       '<img src="'+photo.dataUrl+'" alt="記録写真" />' +
-      (removeAction ? '<button class="rm" data-action="'+removeAction+'" data-card="'+cardId+'" data-photo="'+photoId+'">×</button>' : '') +
+      (removeAction ? '<button class="rm" data-action="'+removeAction+'" data-card="'+cardId+'" data-mission="'+missionId+'" data-kind="'+kind+'">×</button>' : '') +
       '<div class="dt">'+escapeHtml((photo.date||'').slice(5))+'</div>' +
     '</div>'
   );
@@ -497,10 +516,36 @@ function renderChecklist(card){
   html += '</div>';
   return html;
 }
+/* 撮影ミッション（スタンプラリー方式・画角固定）。kind='before'（ふだんの記録）または 'after'（もしもの記録） */
+function renderMissionList(card, kind){
+  var html = '<div class="space-y-3">';
+  card.missions.forEach(function(m, idx){
+    var photo = kind==='before' ? m.beforePhoto : m.afterPhoto;
+    var done = !!photo;
+    html += (
+      '<div class="card" style="padding:12px 14px;">' +
+        '<div class="flex items-center justify-between mb-2">' +
+          '<div class="flex items-center gap-2">' +
+            '<span class="font-bold text-sm">STEP '+(idx+1)+'</span>' +
+            '<span class="text-sm">'+escapeHtml(m.label)+'</span>' +
+          '</div>' +
+          (done
+            ? '<span class="font-black" style="color:var(--sage-dark);font-size:20px;">✅</span>'
+            : '<span class="opacity-30 font-black" style="font-size:20px;">◯</span>') +
+        '</div>' +
+        (photo ? '<div class="flex gap-2 mb-2">' + renderThumb(photo, 'remove-mission-photo', card.id, m.id, kind) + '</div>' : '') +
+        '<button class="btn btn-outline w-full press" data-action="capture-mission" data-card="'+card.id+'" data-mission="'+m.id+'" data-kind="'+kind+'">'+(done ? '📷 撮り直す' : '📷 撮影する')+'</button>' +
+      '</div>'
+    );
+  });
+  html += '</div>';
+  return html;
+}
 function renderCard(card){
   var open = state.openCardId === card.id;
   var editingName = state.editingNameCardId === card.id;
   var doneCount = card.checklist.filter(function(c){return c.checked;}).length;
+  var missionDone = card.missions.filter(function(m){return m.beforePhoto;}).length;
   var html = '<div class="card">';
   html += (
     '<button class="press w-full flex items-center justify-between" style="padding:12px 16px;background:transparent;border:none;text-align:left;" data-action="toggle-card-open" data-card="'+card.id+'">' +
@@ -508,7 +553,7 @@ function renderCard(card){
         '<span class="text-xl">'+(card.type==='house'?'🏠':'🚗')+'</span>' +
         '<div>' +
           '<div class="font-bold">'+escapeHtml(card.name)+'</div>' +
-          '<div class="text-xs opacity-50">記録写真 '+card.beforePhotos.length+'枚・チェック '+doneCount+'/'+card.checklist.length+'</div>' +
+          '<div class="text-xs opacity-50">撮影ミッション '+missionDone+'/'+card.missions.length+'・チェック '+doneCount+'/'+card.checklist.length+'</div>' +
         '</div>' +
       '</div>' +
       '<span class="opacity-40">'+(open?'▲':'▼')+'</span>' +
@@ -533,11 +578,9 @@ function renderCard(card){
     html += '<div><p class="font-bold text-sm mb-2">✅ そなえのチェック</p>' + renderChecklist(card) + '</div>';
 
     html += '<div>';
-    html += '<p class="font-bold text-sm mb-2">📸 無事な今の記録（ビフォー写真）</p>';
-    html += '<div class="flex gap-2 overflow-x-auto pb-1 mb-2">';
-    card.beforePhotos.forEach(function(p){ html += renderThumb(p, 'remove-photo-before', card.id, p.id); });
-    html += '</div>';
-    html += '<button class="btn btn-outline w-full press" data-action="capture" data-kind="before" data-card="'+card.id+'">📷 写真をとる・えらぶ</button>';
+    html += '<p class="font-bold text-sm mb-2">📸 撮影ミッション（ふだんの記録）</p>';
+    html += '<p class="text-xs opacity-50 mb-2">同じ場所・同じ角度で撮っておくと、もしもの時に比較しやすくなります</p>';
+    html += renderMissionList(card, 'before');
     html += '</div>';
 
     html += '<button class="btn btn-ghost press" data-action="delete-card" data-card="'+card.id+'">このカードを削除する</button>';
@@ -552,8 +595,9 @@ function renderHomeView(){
   var html = '<div class="fade-in" style="padding:16px 16px 24px;">';
   html += (
     '<div class="rounded-2xl text-white p-4" style="background:var(--sage-dark);">' +
-      '<p class="font-bold text-lg">今日も、そなえの積み重ね</p>' +
-      '<p class="text-sm opacity-90" style="margin-top:4px;">無事な「いえ」と「くるま」の様子を、今のうちに残しておきましょう。</p>' +
+      '<p class="font-bold text-xs opacity-80" style="letter-spacing:0.02em;">ふだんの記録（平時）</p>' +
+      '<p class="font-bold text-lg" style="margin-top:2px;">今日も、そなえの積み重ね</p>' +
+      '<p class="text-sm opacity-90" style="margin-top:4px;">無事な「いえ」と「くるま」の様子を、決まった画角で残しておきましょう。</p>' +
     '</div>'
   );
   html += '<div style="margin-top:24px;">';
@@ -589,8 +633,9 @@ function renderEmergencyView(){
   if(!state.emergencyMode){
     html += (
       '<div class="rounded-3xl text-white text-center p-5" style="background:var(--danger);">' +
-        '<p class="text-3xl font-black mb-1">⚠️ きんきゅう モード</p>' +
-        '<p class="text-lg font-bold">落ち着いて、写真をとりましょう</p>' +
+        '<p class="font-bold opacity-90" style="font-size:13px;">もしもの記録（緊急時）</p>' +
+        '<p class="text-3xl font-black mb-1" style="margin-top:4px;">⚠️ 落ち着いて</p>' +
+        '<p class="text-lg font-bold">写真をとりましょう</p>' +
       '</div>' +
       '<p class="text-center text-lg font-bold" style="margin-top:20px;">※ 片付ける前に撮影してください</p>' +
       '<p class="text-center text-base">メジャーや人と一緒に写すと、大きさが伝わりやすくなります</p>' +
@@ -616,27 +661,19 @@ function renderEmergencyView(){
   var selected = state.emergencyTarget ? findCard(state.emergencyTarget) : null;
   if(!selected){
     html += '<h2 class="text-2xl font-black" style="color:var(--danger);margin-top:12px;">どの'+(state.emergencyMode==='house'?'いえ':'くるま')+'を撮りますか？</h2>';
-    if(list.length===0) html += '<p class="font-bold text-lg" style="margin-top:12px;">先に「ホーム」画面でカードを追加してください</p>';
+    if(list.length===0) html += '<p class="font-bold text-lg" style="margin-top:12px;">先に「ふだんの記録」画面でカードを追加してください</p>';
     html += '<div class="space-y-3" style="margin-top:12px;">';
     list.forEach(function(c){
       html += '<button class="press card w-full text-xl font-black text-left" style="padding:16px;border:2px solid var(--danger);" data-action="emergency-select" data-card="'+c.id+'">'+(state.emergencyMode==='house'?'🏠':'🚗')+' '+escapeHtml(c.name)+'</button>';
     });
     html += '</div>';
   } else {
-    var guide = state.emergencyMode==='house' ? HOUSE_SHOT_GUIDE : CAR_SHOT_GUIDE;
     html += (
-      '<div class="card" style="margin-top:12px;padding:20px;border:2px solid var(--danger);">' +
-        '<h3 class="text-2xl font-black mb-3" style="color:var(--danger);">'+(state.emergencyMode==='house'?'🏠':'🚗')+' '+escapeHtml(selected.name)+'</h3>' +
-        '<ul class="space-y-2 mb-4" style="list-style:none;padding:0;margin:0;">'
+      '<div style="margin-top:12px;">' +
+        '<h3 class="text-2xl font-black mb-1" style="color:var(--danger);">'+(state.emergencyMode==='house'?'🏠':'🚗')+' '+escapeHtml(selected.name)+'</h3>' +
+        '<p class="text-sm font-bold mb-3">「ふだんの記録」と同じ画角・同じ順番で撮影してください</p>'
     );
-    guide.forEach(function(g){
-      html += '<li class="text-lg font-bold flex items-start gap-2"><span style="color:var(--amber);">●</span><span>'+escapeHtml(g)+'</span></li>';
-    });
-    html += '</ul>';
-    html += '<div class="flex gap-2 overflow-x-auto pb-2 mb-3">';
-    selected.afterPhotos.forEach(function(p){ html += renderThumb(p, 'remove-photo-after', selected.id, p.id); });
-    html += '</div>';
-    html += '<button class="btn btn-outline w-full press" data-action="capture" data-kind="after" data-card="'+selected.id+'">📷 今すぐ撮影する</button>';
+    html += renderMissionList(selected, 'after');
     html += '</div>';
   }
   html += '</div>';
@@ -658,16 +695,21 @@ function renderSummaryView(){
   state.data.cards.forEach(function(c){
     html += '<div class="border-t" style="padding-top:16px;margin-top:16px;">';
     html += '<h3 class="font-bold mb-2">'+(c.type==='house'?'🏠':'🚗')+' '+escapeHtml(c.name)+'</h3>';
-    html += '<div class="grid grid-cols-2 gap-3">';
-    html += '<div><p class="text-xs font-bold mb-1" style="color:var(--sage-dark);">ビフォー（無事な時）</p><div class="flex flex-wrap gap-1">';
-    if(c.beforePhotos.length===0) html += '<p class="text-xs opacity-40">写真なし</p>';
-    c.beforePhotos.forEach(function(p){ html += '<img src="'+p.dataUrl+'" style="width:64px;height:64px;object-fit:cover;border-radius:10px;border:1px solid var(--line);" />'; });
-    html += '</div></div>';
-    html += '<div><p class="text-xs font-bold mb-1" style="color:var(--danger);">アフター（被災時）</p><div class="flex flex-wrap gap-1">';
-    if(c.afterPhotos.length===0) html += '<p class="text-xs opacity-40">写真なし</p>';
-    c.afterPhotos.forEach(function(p){ html += '<img src="'+p.dataUrl+'" style="width:64px;height:64px;object-fit:cover;border-radius:10px;border:1px solid var(--line);" />'; });
-    html += '</div></div>';
-    html += '</div></div>';
+    c.missions.forEach(function(m, idx){
+      html += '<div style="margin-bottom:12px;">';
+      html += '<p class="text-xs font-bold mb-1">STEP '+(idx+1)+'　'+escapeHtml(m.label)+'</p>';
+      html += '<div class="grid grid-cols-2 gap-3">';
+      html += '<div><p class="text-xs font-bold mb-1" style="color:var(--sage-dark);">元の状態</p><div class="flex flex-wrap gap-1">';
+      if(!m.beforePhoto) html += '<p class="text-xs opacity-40">写真なし</p>';
+      else html += '<img src="'+m.beforePhoto.dataUrl+'" style="width:64px;height:64px;object-fit:cover;border-radius:10px;border:1px solid var(--line);" />';
+      html += '</div></div>';
+      html += '<div><p class="text-xs font-bold mb-1" style="color:var(--danger);">今回の状態</p><div class="flex flex-wrap gap-1">';
+      if(!m.afterPhoto) html += '<p class="text-xs opacity-40">写真なし</p>';
+      else html += '<img src="'+m.afterPhoto.dataUrl+'" style="width:64px;height:64px;object-fit:cover;border-radius:10px;border:1px solid var(--line);" />';
+      html += '</div></div>';
+      html += '</div></div>';
+    });
+    html += '</div>';
   });
   html += '</div>';
 
@@ -754,7 +796,7 @@ function renderSettingsView(){
     '<section class="card p-4 space-y-3">' +
       '<p class="font-bold">🔐 合言葉（ロック番号）</p>' +
       '<button class="btn btn-outline w-full press" data-action="start-change-pin">合言葉を変える</button>' +
-      '<button class="btn btn-ghost press" data-action="reset-pin">合言葉を忘れた場合はこちら</button>' +
+      '<p class="text-xs" style="color:var(--danger);">※変更したコードを忘れた場合、復元できませんのでメモをお控えください</p>' +
     '</section>'
   );
 
@@ -788,8 +830,8 @@ function renderReminderPopup(){
 
 /* ---------- メインアプリ ---------- */
 var TABS = [
-  { key:'home', label:'ホーム', icon:'🏠' },
-  { key:'emergency', label:'きんきゅう', icon:'⚠️' },
+  { key:'home', label:'ふだんの記録', icon:'🏠' },
+  { key:'emergency', label:'もしもの記録', icon:'⚠️' },
   { key:'summary', label:'まとめ', icon:'🗂️' },
   { key:'phone', label:'でんわ', icon:'☎️' },
   { key:'settings', label:'せってい', icon:'⚙️' }
@@ -900,8 +942,8 @@ function checkReminders(){
   }catch(e){}
 }
 
-function tryCameraCapture(cardId, kind){
-  state.pendingCapture = { cardId: cardId, kind: kind };
+function tryCameraCapture(cardId, kind, missionId){
+  state.pendingCapture = { cardId: cardId, kind: kind, missionId: missionId };
   var cam = document.getElementById('camera-input');
   var file = document.getElementById('file-input');
   try{
@@ -929,9 +971,11 @@ function handleCapturedFile(fileObj){
     if(err){ setToast('写真の読み込みに失敗しました。もう一度お試しください'); return; }
     var card = findCard(target.cardId);
     if(!card){ return; }
+    var mission = findMission(card, target.missionId);
+    if(!mission){ return; }
     var photo = { id: uid(), dataUrl: dataUrl, date: todayISO() };
-    if(target.kind==='before') card.beforePhotos.push(photo);
-    else card.afterPhotos.push(photo);
+    if(target.kind==='before') mission.beforePhoto = photo;
+    else mission.afterPhoto = photo;
     saveData();
     render();
   });
@@ -962,6 +1006,7 @@ function importDataFromFile(fileObj){
         var merged = {};
         for(var k in base){ merged[k] = (k in parsed) ? parsed[k] : base[k]; }
         if(!Array.isArray(merged.cards)) merged.cards = [];
+        merged.cards = merged.cards.map(function(c){ try{ return normalizeCard(c); }catch(e2){ return c; } });
         if(!merged.reminders || !merged.reminders.length) merged.reminders = DEFAULT_REMINDERS.slice();
         state.data = merged;
         saveData();
@@ -1002,12 +1047,6 @@ function attachEvents(){
         case 'start-change-pin':
           state.changingPin=true; state.changePinStage='current'; state.changePinNewVal=''; state.pinInput=''; state.pinError='';
           render();
-          break;
-        case 'reset-pin':
-          if(confirm('パスコードを初期値「0000」にリセットします。よろしいですか？')){
-            state.data.pin = DEFAULT_PIN; saveData();
-            try{ location.reload(); }catch(err){ state.unlocked=false; state.pinInput=''; state.pinError=''; render(); }
-          }
           break;
         case 'switch-tab':
           state.tab = el.getAttribute('data-tab');
@@ -1065,16 +1104,15 @@ function attachEvents(){
           render();
           break;
         }
-        case 'capture': tryCameraCapture(el.getAttribute('data-card'), el.getAttribute('data-kind')); break;
-        case 'remove-photo-before': {
-          var cb = findCard(el.getAttribute('data-card'));
-          if(cb){ cb.beforePhotos = cb.beforePhotos.filter(function(p){return p.id!==el.getAttribute('data-photo');}); saveData(); }
-          render();
-          break;
-        }
-        case 'remove-photo-after': {
-          var ca = findCard(el.getAttribute('data-card'));
-          if(ca){ ca.afterPhotos = ca.afterPhotos.filter(function(p){return p.id!==el.getAttribute('data-photo');}); saveData(); }
+        case 'capture-mission': tryCameraCapture(el.getAttribute('data-card'), el.getAttribute('data-kind'), el.getAttribute('data-mission')); break;
+        case 'remove-mission-photo': {
+          var mc = findCard(el.getAttribute('data-card'));
+          var mm = mc ? findMission(mc, el.getAttribute('data-mission')) : null;
+          if(mm){
+            if(el.getAttribute('data-kind')==='before') mm.beforePhoto = null;
+            else mm.afterPhoto = null;
+            saveData();
+          }
           render();
           break;
         }
