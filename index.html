@@ -178,14 +178,16 @@ function escapeHtml(s){
 
 var HOUSE_CHECKLIST_DEFAULT = ['家具の固定','ガラスの飛散防止','脱出用ハンマーの設置','非常持ち出し袋の準備','消火器の設置'];
 var CAR_CHECKLIST_DEFAULT = ['ガソリン半分以上をキープ','車内に飲料水を常備','非常用工具の積み込み','任意保険の証券を確認'];
-var HOUSE_MISSION_STEPS = ['建物全体（引きの全景）','部屋全体（室内）','主要な家電・家具','傾き・ひび割れ（壁・柱）'];
-var CAR_MISSION_STEPS = ['車両全体（斜め前・斜め後）','ナンバープレート（車両特定用）','タイヤ・足回り','車内・オドメーター（走行距離）'];
+var HOUSE_MISSION_STEPS = ['建物全景①（正面・対角から2面撮影）','建物全景②（裏手・対角から残り2面撮影）','室内・傾き（主要なお部屋・壁・家具配置）','被害・重要箇所（給湯器・壁のひび割れ・固定状況等のアップ）'];
+var CAR_MISSION_STEPS = ['車両全体（斜め前・斜め後）','ナンバープレート（車両特定用）','車検証・任意保険証（水没・紛失対策）','タイヤ・足回り（水没ライン確認）','車内・オドメーター（走行距離・室内確認）'];
+var HOUSE_MISSION_HINT = '例：車庫・カーポート、物置、ブロック塀、バルコニー、太陽光パネル 等';
 var PHONE_LIST = [
   { label:'警察', num:'110', icon:'🚓', note:'事件・事故のとき' },
   { label:'消防・救急', num:'119', icon:'🚒', note:'火事・急病のとき' },
   { label:'海上保安庁', num:'118', icon:'⚓', note:'海の事故のとき' },
-  { label:'JAFロードサービス', num:'#8139', icon:'🚙', note:'車のトラブルのとき' },
-  { label:'救急安心センター', num:'#7119', icon:'☎️', note:'救急車を呼ぶか迷ったとき' }
+  { label:'救急安心センター', num:'#7119', icon:'☎️', note:'救急車を呼ぶか迷ったとき' },
+  { label:'小児救急電話相談', num:'#8000', icon:'👶', note:'子どもの急な体調で迷ったとき' },
+  { label:'JAFロードサービス', num:'#8139', icon:'🚙', note:'車のトラブルのとき' }
 ];
 var DEFAULT_REMINDERS = [
   { id:'r-0117', label:'冬の備え点検日', date:'01-17', monthly:false, enabled:true, builtin:true },
@@ -230,6 +232,7 @@ var state = {
   changingPin: false,
   changePinStage: null,   // 'current' | 'new1' | 'new2' | null
   changePinNewVal: '',
+  showForgotModal: false,
   tab: 'home',
   openCardId: null,
   editingNameCardId: null,
@@ -288,7 +291,7 @@ function compressImage(file, maxWidth, callback){
 /* ========================= カード操作 ========================= */
 function makeMissions(type){
   var steps = type==='house' ? HOUSE_MISSION_STEPS : CAR_MISSION_STEPS;
-  return steps.map(function(label){ return { id: uid(), label: label, beforePhoto: null, afterPhoto: null }; });
+  return steps.map(function(label){ return { id: uid(), label: label, beforePhoto: null, afterPhoto: null, custom:false }; });
 }
 function normalizeCard(card){
   try{
@@ -296,6 +299,7 @@ function normalizeCard(card){
     if(!card.missions || !Array.isArray(card.missions) || card.missions.length===0){
       card.missions = makeMissions(card.type==='car' ? 'car' : 'house');
     }
+    card.missions.forEach(function(m){ if(typeof m.custom !== 'boolean') m.custom = false; });
   }catch(e){}
   return card;
 }
@@ -307,6 +311,18 @@ function findMission(card, missionId){
   if(!card) return null;
   for(var i=0;i<card.missions.length;i++){ if(card.missions[i].id===missionId) return card.missions[i]; }
   return null;
+}
+function addMission(cardId, label){
+  var card = findCard(cardId);
+  if(!card || !label) return;
+  card.missions.push({ id: uid(), label: label, beforePhoto: null, afterPhoto: null, custom:true });
+  saveData();
+}
+function removeMission(cardId, missionId){
+  var card = findCard(cardId);
+  if(!card) return;
+  card.missions = card.missions.filter(function(m){ return m.id !== missionId; });
+  saveData();
 }
 function addCard(type){
   var defaults = type==='house' ? HOUSE_CHECKLIST_DEFAULT : CAR_CHECKLIST_DEFAULT;
@@ -385,7 +401,7 @@ function renderPinPad(){
   return html;
 }
 function renderLockScreen(){
-  return (
+  var html = (
     '<div class="flex flex-col items-center justify-center safe-top safe-bottom" style="min-height:100vh;padding:24px;">' +
       '<div class="text-5xl mb-2">🔒</div>' +
       '<h1 class="text-2xl font-bold mb-6">ソナエログ</h1>' +
@@ -394,9 +410,20 @@ function renderLockScreen(){
         (state.pinError ? '<p class="pin-error text-center mb-2">'+escapeHtml(state.pinError)+'</p>' : '') +
         renderPinDots() + renderPinPad() +
         '<p class="text-xs opacity-50 text-center mt-3">※初期パスコード：0000</p>' +
+        '<button class="btn btn-ghost w-full mt-3 press" data-action="show-forgot-modal">パスコードを忘れた場合</button>' +
       '</div>' +
     '</div>'
   );
+  if(state.showForgotModal){
+    html += renderModal('forgot-pin', 'パスコードを忘れた場合',
+      '<div class="space-y-3 text-sm leading-relaxed">' +
+        '<p>※コードを忘れて解除できない場合は、ブラウザのデータ（Cookie・サイトデータ／ストレージ）を消去すると、初期状態（パスコード「0000」）にリセットされます。</p>' +
+        '<p class="text-xs opacity-60">※ブラウザのデータを消去すると、これまでに保存した記録・写真もすべて消えてしまいます。心配な場合は、先に「せってい」画面の「データを保存する」で記録を書き出してから行ってください。</p>' +
+        '<button class="btn btn-sage w-full press" data-action="close-forgot-modal">わかりました</button>' +
+      '</div>'
+    );
+  }
+  return html;
 }
 function renderChangePinScreen(){
   var stage = state.changePinStage;
@@ -517,7 +544,7 @@ function renderChecklist(card){
   return html;
 }
 /* 撮影ミッション（スタンプラリー方式・画角固定）。kind='before'（ふだんの記録）または 'after'（もしもの記録） */
-function renderMissionList(card, kind){
+function renderMissionList(card, kind, allowManage){
   var html = '<div class="space-y-3">';
   card.missions.forEach(function(m, idx){
     var photo = kind==='before' ? m.beforePhoto : m.afterPhoto;
@@ -528,6 +555,7 @@ function renderMissionList(card, kind){
           '<div class="flex items-center gap-2">' +
             '<span class="font-bold text-sm">STEP '+(idx+1)+'</span>' +
             '<span class="text-sm">'+escapeHtml(m.label)+'</span>' +
+            (m.custom ? '<span class="text-xs" style="color:var(--amber);">（追加）</span>' : '') +
           '</div>' +
           (done
             ? '<span class="font-black" style="color:var(--sage-dark);font-size:20px;">✅</span>'
@@ -535,6 +563,7 @@ function renderMissionList(card, kind){
         '</div>' +
         (photo ? '<div class="flex gap-2 mb-2">' + renderThumb(photo, 'remove-mission-photo', card.id, m.id, kind) + '</div>' : '') +
         '<button class="btn btn-outline w-full press" data-action="capture-mission" data-card="'+card.id+'" data-mission="'+m.id+'" data-kind="'+kind+'">'+(done ? '📷 撮り直す' : '📷 撮影する')+'</button>' +
+        (allowManage && m.custom ? '<button class="btn btn-ghost press" style="margin-top:6px;" data-action="delete-mission" data-card="'+card.id+'" data-mission="'+m.id+'">この項目を削除する</button>' : '') +
       '</div>'
     );
   });
@@ -580,7 +609,17 @@ function renderCard(card){
     html += '<div>';
     html += '<p class="font-bold text-sm mb-2">📸 撮影ミッション（ふだんの記録）</p>';
     html += '<p class="text-xs opacity-50 mb-2">同じ場所・同じ角度で撮っておくと、もしもの時に比較しやすくなります</p>';
-    html += renderMissionList(card, 'before');
+    html += renderMissionList(card, 'before', true);
+    html += (
+      '<div class="border-t space-y-2" style="padding-top:12px;margin-top:12px;">' +
+        '<p class="text-sm font-bold">撮影項目を追加する</p>' +
+        (card.type==='house' ? '<p class="text-xs opacity-50">'+escapeHtml(HOUSE_MISSION_HINT)+'</p>' : '') +
+        '<div class="flex gap-2">' +
+          '<input type="text" placeholder="項目名を入力" data-role="new-mission-input" data-card="'+card.id+'" class="flex-1" style="border:1px solid var(--line);border-radius:14px;padding:8px 12px;font-size:13px;" />' +
+          '<button class="btn btn-sage press" style="padding:8px 16px;" data-action="add-mission" data-card="'+card.id+'">追加</button>' +
+        '</div>' +
+      '</div>'
+    );
     html += '</div>';
 
     html += '<button class="btn btn-ghost press" data-action="delete-card" data-card="'+card.id+'">このカードを削除する</button>';
@@ -673,7 +712,7 @@ function renderEmergencyView(){
         '<h3 class="text-2xl font-black mb-1" style="color:var(--danger);">'+(state.emergencyMode==='house'?'🏠':'🚗')+' '+escapeHtml(selected.name)+'</h3>' +
         '<p class="text-sm font-bold mb-3">「ふだんの記録」と同じ画角・同じ順番で撮影してください</p>'
     );
-    html += renderMissionList(selected, 'after');
+    html += renderMissionList(selected, 'after', false);
     html += '</div>';
   }
   html += '</div>';
@@ -1048,6 +1087,8 @@ function attachEvents(){
           state.changingPin=true; state.changePinStage='current'; state.changePinNewVal=''; state.pinInput=''; state.pinError='';
           render();
           break;
+        case 'show-forgot-modal': state.showForgotModal=true; render(); break;
+        case 'close-forgot-modal': state.showForgotModal=false; render(); break;
         case 'switch-tab':
           state.tab = el.getAttribute('data-tab');
           state.openCardId = null; state.editingNameCardId = null;
@@ -1093,6 +1134,24 @@ function attachEvents(){
           if(card4 && input2 && input2.value.trim()){
             card4.checklist.push({ id: uid(), label: input2.value.trim(), checked:false });
             saveData();
+          }
+          render();
+          break;
+        }
+        case 'add-mission': {
+          var mcid = el.getAttribute('data-card');
+          var minput = root.querySelector('[data-role="new-mission-input"][data-card="'+mcid+'"]');
+          if(minput && minput.value.trim()){
+            addMission(mcid, minput.value.trim());
+          }
+          render();
+          break;
+        }
+        case 'delete-mission': {
+          var dmc = el.getAttribute('data-card');
+          var dmm = el.getAttribute('data-mission');
+          if(confirm('この撮影項目を削除しますか？撮影済みの写真も消えます')){
+            removeMission(dmc, dmm);
           }
           render();
           break;
@@ -1198,6 +1257,10 @@ function attachEvents(){
           var cardId = e.target.getAttribute('data-card');
           var btn = root.querySelector('[data-action="add-check"][data-card="'+cardId+'"]');
           if(btn) btn.click();
+        } else if(e.target.getAttribute && e.target.getAttribute('data-role')==='new-mission-input'){
+          var cardId2 = e.target.getAttribute('data-card');
+          var btn2 = root.querySelector('[data-action="add-mission"][data-card="'+cardId2+'"]');
+          if(btn2) btn2.click();
         }
       }
     }catch(err){}
@@ -1207,6 +1270,7 @@ function closeModalById(id){
   if(id==='flood-alert') state.showFloodAlert=false;
   else if(id==='print-guide') state.showPrintGuide=false;
   else if(id==='reminder-popup') state.showReminderPopup=false;
+  else if(id==='forgot-pin') state.showForgotModal=false;
   else if(id==='ios-install'){ state.showIOSInstallModal=false; state.installDismissed=true; storage.set('sonaelog_install_dismissed', true); }
   render();
 }
