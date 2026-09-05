@@ -1,0 +1,958 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+<title>ソナエログ｜そなえあればうれしいアプリ</title>
+<meta name="theme-color" content="#768A75" />
+<link rel="manifest" href="./manifest.json" />
+<link rel="apple-touch-icon" href="./icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-title" content="ソナエログ" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  @font-face { font-family: 'system'; src: local(-apple-system); }
+  :root{
+    --sage:#5F7A63;
+    --sage-dark:#3F5745;
+    --sand:#F4F3EF;
+    --navy:#2C3E50;
+    --amber:#B7791F;
+    --danger:#8C3B2E;
+    --line:#DAD6CC;
+  }
+  html,body{ background:var(--sand); color:var(--navy); font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif; -webkit-tap-highlight-color:transparent; overscroll-behavior:none; }
+  * { box-sizing:border-box; }
+  button { touch-action:manipulation; }
+  .tapbtn{ min-height:44px; min-width:44px; }
+  .safe-bottom{ padding-bottom:env(safe-area-inset-bottom); }
+  .safe-top{ padding-top:env(safe-area-inset-top); }
+  ::-webkit-scrollbar{ width:6px; height:6px; }
+  ::-webkit-scrollbar-thumb{ background:#c9c4b8; border-radius:4px; }
+  @media print{
+    .no-print{ display:none !important; }
+    body{ background:#fff; }
+    .print-page{ box-shadow:none !important; margin:0 !important; }
+  }
+  .fade-in{ animation: fadein .25s ease; }
+  @keyframes fadein{ from{opacity:0; transform:translateY(6px);} to{opacity:1; transform:translateY(0);} }
+  .press{ transition: transform .1s ease, background-color .15s ease; }
+  .press:active{ transform: scale(0.96); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react,env">
+const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+/* ============== ストレージ（localStorage + メモリフォールバック） ============== */
+const memoryStore = {};
+const storage = {
+  get(key, fallback){
+    try{
+      const v = localStorage.getItem(key);
+      if(v === null) return fallback;
+      return JSON.parse(v);
+    }catch(e){
+      return (key in memoryStore) ? memoryStore[key] : fallback;
+    }
+  },
+  set(key, value){
+    try{
+      localStorage.setItem(key, JSON.stringify(value));
+    }catch(e){
+      memoryStore[key] = value;
+    }
+  }
+};
+const STORE_KEY = 'sonaelog_data_v1';
+
+function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
+function todayISO(){ const d=new Date(); return d.toISOString().slice(0,10); }
+function fmtDateJP(iso){
+  if(!iso) return '';
+  const d = new Date(iso);
+  if(isNaN(d)) return iso;
+  return `${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日`;
+}
+
+const DEFAULT_REMINDERS = [
+  { id:'r-0117', label:'冬の備え点検日', date:'01-17', monthly:false, enabled:true, builtin:true },
+  { id:'r-0311', label:'防災の日（3月）', date:'03-11', monthly:false, enabled:true, builtin:true },
+  { id:'r-0416', label:'防災の日（4月）', date:'04-16', monthly:false, enabled:true, builtin:true },
+  { id:'r-0901', label:'防災の日（9月）', date:'09-01', monthly:false, enabled:true, builtin:true },
+  { id:'r-monthly', label:'毎月の点検日', date:'01', monthly:true, enabled:true, builtin:true },
+];
+
+function defaultData(){
+  return {
+    pin: null,
+    cards: [],
+    reminders: DEFAULT_REMINDERS,
+    customEmergencyNote: '',
+    createdAt: todayISO(),
+  };
+}
+
+function loadData(){
+  const d = storage.get(STORE_KEY, null);
+  if(!d) return defaultData();
+  return { ...defaultData(), ...d, reminders: d.reminders && d.reminders.length ? d.reminders : DEFAULT_REMINDERS };
+}
+function saveData(data){ storage.set(STORE_KEY, data); }
+
+/* ============== 画像圧縮 ============== */
+function compressImage(file, maxWidth){
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        let w = img.width, h = img.height;
+        if(w > maxWidth){
+          h = Math.round(h * (maxWidth / w));
+          w = maxWidth;
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        try{
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.78);
+          resolve(dataUrl);
+        }catch(err){ reject(err); }
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+/* ============== 共通UI部品 ============== */
+function BigButton({ children, onClick, tone='sage', className='', disabled }){
+  const tones = {
+    sage: 'bg-[--sage] hover:bg-[--sage-dark] text-white',
+    outline: 'bg-white border-2 border-[--sage] text-[--sage-dark]',
+    amber: 'bg-[--amber] text-white',
+    danger: 'bg-[--danger] text-white',
+    ghost: 'bg-transparent text-[--navy] underline',
+  };
+  return (
+    <button
+      disabled={disabled}
+      onClick={onClick}
+      className={`press tapbtn rounded-2xl px-5 py-3 font-bold text-base shadow-sm disabled:opacity-40 ${tones[tone]} ${className}`}
+      style={ tone==='sage' ? {backgroundColor:'var(--sage)'} : tone==='amber' ? {backgroundColor:'var(--amber)'} : tone==='danger' ? {backgroundColor:'var(--danger)'} : {} }
+    >
+      {children}
+    </button>
+  );
+}
+
+function Toast({ message, onDone }){
+  useEffect(() => {
+    if(!message) return;
+    const t = setTimeout(onDone, 2600);
+    return () => clearTimeout(t);
+  }, [message]);
+  if(!message) return null;
+  return (
+    <div className="fixed left-1/2 -translate-x-1/2 bottom-24 z-[999] fade-in px-4 py-3 rounded-xl bg-[--navy] text-white text-sm shadow-lg max-w-[90%] text-center" style={{backgroundColor:'var(--navy)'}}>
+      {message}
+    </div>
+  );
+}
+
+function Modal({ open, onClose, title, children, wide }){
+  if(!open) return null;
+  return (
+    <div className="fixed inset-0 z-[900] bg-black/40 flex items-end sm:items-center justify-center p-0 sm:p-4" onClick={onClose}>
+      <div
+        className={`fade-in bg-white w-full ${wide ? 'sm:max-w-lg' : 'sm:max-w-sm'} rounded-t-3xl sm:rounded-3xl max-h-[88vh] overflow-y-auto p-5`}
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-lg font-bold" style={{color:'var(--navy)'}}>{title}</h3>
+          <button className="press tapbtn rounded-full text-2xl leading-none px-3" onClick={onClose} aria-label="閉じる">×</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/* ============== フッター（必須共通要素） ============== */
+function AppFooter(){
+  return (
+    <footer style={{textAlign:'center', fontSize:'0.75rem', color:'#888', marginTop:'3rem', padding:'1rem 0.5rem 1.5rem', lineHeight:1.5}}>
+      <p style={{marginBottom:'0.5rem'}}>【ご利用について】</p>
+      <p style={{marginBottom:'0.5rem'}}>本アプリは、使用される方の毎日を楽しく、快適にする目的で開発されたWEBアプリケーションです。</p>
+      <p style={{marginBottom:'0.5rem'}}>動作確認には万全を期しておりますが、端末環境やブラウザの仕様変更等に伴うデータ損失やトラブルについて開発者は一切の責任を負いかねます。</p>
+      <p>ご意見・不具合のご報告は X（<a href="https://x.com/lblt_labo" target="_blank" rel="noopener" style={{color:'#666', textDecoration:'underline'}}>@lblt_labo</a>）までお願いいたします。</p>
+    </footer>
+  );
+}
+
+/* ============== PWAインストール案内 ============== */
+function useStandalone(){
+  const [standalone, setStandalone] = useState(false);
+  useEffect(() => {
+    const check = () => {
+      const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+      setStandalone(isStandalone);
+    };
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, []);
+  return standalone;
+}
+
+function isIOS(){
+  return /iphone|ipad|ipod/i.test(window.navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
+function InstallBanner(){
+  const standalone = useStandalone();
+  const [deferred, setDeferred] = useState(null);
+  const [dismissed, setDismissed] = useState(() => storage.get('sonaelog_install_dismissed', false));
+  const [showIOSModal, setShowIOSModal] = useState(false);
+
+  useEffect(() => {
+    const handler = (e) => { e.preventDefault(); setDeferred(e); };
+    window.addEventListener('beforeinstallprompt', handler);
+    return () => window.removeEventListener('beforeinstallprompt', handler);
+  }, []);
+
+  if(standalone || dismissed) return null;
+  const ios = isIOS();
+  if(!deferred && !ios) return null;
+
+  const dismiss = () => { setDismissed(true); storage.set('sonaelog_install_dismissed', true); };
+
+  return (
+    <>
+      <div className="no-print fixed top-0 left-0 right-0 z-[800] safe-top" style={{backgroundColor:'var(--sage-dark)'}}>
+        <div className="flex items-center justify-between gap-2 px-4 py-2 text-white text-sm">
+          <span>📲 ホーム画面に追加すると、もっと使いやすくなります</span>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              className="press tapbtn bg-white/90 text-[--sage-dark] rounded-full px-3 py-1.5 font-bold text-sm"
+              style={{color:'var(--sage-dark)'}}
+              onClick={async () => {
+                if(deferred){
+                  deferred.prompt();
+                  await deferred.userChoice;
+                  setDeferred(null);
+                  dismiss();
+                } else if(ios){
+                  setShowIOSModal(true);
+                }
+              }}
+            >追加する</button>
+            <button className="press tapbtn text-white/80 text-xl px-2" onClick={dismiss} aria-label="閉じる">×</button>
+          </div>
+        </div>
+      </div>
+      <Modal open={showIOSModal} onClose={() => { setShowIOSModal(false); dismiss(); }} title="ホーム画面への追加方法">
+        <div className="space-y-4 text-[15px] leading-relaxed">
+          <p>① 画面下（または上）の<span className="font-bold">共有アイコン「⎋」</span>をタップします。</p>
+          <div className="rounded-xl bg-[--sand] p-4 text-center text-3xl" style={{backgroundColor:'var(--sand)'}}>⎋</div>
+          <p>② メニューの中から<span className="font-bold">「ホーム画面に追加」</span>を選びます。</p>
+          <div className="rounded-xl bg-[--sand] p-4 text-center" style={{backgroundColor:'var(--sand)'}}>➕ ホーム画面に追加</div>
+          <p>③「追加」を押せば完了です。次回からアイコンをタップするだけで開けます。</p>
+          <BigButton onClick={() => { setShowIOSModal(false); dismiss(); }} className="w-full">わかりました</BigButton>
+        </div>
+      </Modal>
+    </>
+  );
+}
+
+/* ============== PIN ロック ============== */
+function PinPad({ onSubmit, subtitle }){
+  const [val, setVal] = useState('');
+  const push = (n) => { if(val.length<4){ const nv=val+n; setVal(nv); if(nv.length===4){ setTimeout(()=>{ onSubmit(nv); setVal(''); }, 120); } } };
+  return (
+    <div className="text-center">
+      {subtitle && <p className="mb-4 text-sm text-[--navy]/70">{subtitle}</p>}
+      <div className="flex justify-center gap-3 mb-6">
+        {[0,1,2,3].map(i => (
+          <div key={i} className="w-4 h-4 rounded-full border-2" style={{borderColor:'var(--sage)', backgroundColor: val.length>i ? 'var(--sage)' : 'transparent'}} />
+        ))}
+      </div>
+      <div className="grid grid-cols-3 gap-3 max-w-[280px] mx-auto">
+        {['1','2','3','4','5','6','7','8','9'].map(n => (
+          <button key={n} className="press tapbtn h-16 rounded-2xl bg-white text-2xl font-bold shadow" onClick={() => push(n)}>{n}</button>
+        ))}
+        <div />
+        <button className="press tapbtn h-16 rounded-2xl bg-white text-2xl font-bold shadow" onClick={() => push('0')}>0</button>
+        <button className="press tapbtn h-16 rounded-2xl bg-white text-xl font-bold shadow" onClick={() => setVal(v => v.slice(0,-1))}>⌫</button>
+      </div>
+    </div>
+  );
+}
+
+function LockScreen({ data, onUnlock }){
+  const [stage, setStage] = useState(data.pin ? 'lock' : 'setup1');
+  const [firstPin, setFirstPin] = useState('');
+  const [error, setError] = useState('');
+
+  if(stage === 'setup1' || stage === 'setup2'){
+    return (
+      <div className="min-h-screen flex flex-col justify-center items-center px-6 safe-top safe-bottom" style={{backgroundColor:'var(--sand)'}}>
+        <div className="text-5xl mb-2">🛡️</div>
+        <h1 className="text-2xl font-bold mb-1" style={{color:'var(--navy)'}}>ソナエログ</h1>
+        <p className="text-sm text-[--navy]/60 mb-8">そなえあればうれしいアプリ</p>
+        <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow">
+          <p className="font-bold text-center mb-4">
+            {stage==='setup1' ? '合言葉となる4つの数字を決めてください' : 'もう一度、同じ数字を入力してください'}
+          </p>
+          {error && <p className="text-center text-sm mb-2" style={{color:'var(--danger)'}}>{error}</p>}
+          <PinPad onSubmit={(v) => {
+            if(stage==='setup1'){ setFirstPin(v); setStage('setup2'); setError(''); }
+            else{
+              if(v===firstPin){ onUnlock(v, true); }
+              else { setError('数字が違います。最初からやり直してください'); setStage('setup1'); }
+            }
+          }} />
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="min-h-screen flex flex-col justify-center items-center px-6 safe-top safe-bottom" style={{backgroundColor:'var(--sand)'}}>
+      <div className="text-5xl mb-2">🔒</div>
+      <h1 className="text-2xl font-bold mb-8" style={{color:'var(--navy)'}}>ソナエログ</h1>
+      <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow">
+        <p className="font-bold text-center mb-4">合言葉の数字を入力してください</p>
+        {error && <p className="text-center text-sm mb-2" style={{color:'var(--danger)'}}>{error}</p>}
+        <PinPad onSubmit={(v) => {
+          if(v === data.pin){ onUnlock(v, false); }
+          else { setError('数字が違います'); }
+        }} />
+      </div>
+    </div>
+  );
+}
+
+/* ============== チェックリスト規定値 ============== */
+const HOUSE_CHECKLIST_DEFAULT = ['家具の固定','ガラスの飛散防止','脱出用ハンマーの設置','非常持ち出し袋の準備','消火器の設置'];
+const CAR_CHECKLIST_DEFAULT = ['ガソリン半分以上をキープ','車内に飲料水を常備','非常用工具の積み込み','任意保険の証券を確認'];
+
+/* ============== ホーム（平時モード） ============== */
+function PhotoThumb({ photo, onRemove }){
+  return (
+    <div className="relative shrink-0 w-20 h-20 rounded-xl overflow-hidden border" style={{borderColor:'var(--line)'}}>
+      <img src={photo.dataUrl} className="w-full h-full object-cover" />
+      {onRemove && (
+        <button onClick={onRemove} className="press absolute top-0.5 right-0.5 w-6 h-6 rounded-full bg-black/60 text-white text-xs">×</button>
+      )}
+      <div className="absolute bottom-0 left-0 right-0 bg-black/50 text-white text-[9px] text-center py-0.5">{photo.date ? photo.date.slice(5) : ''}</div>
+    </div>
+  );
+}
+
+function CapturePhotoButton({ label, onCapture, toast }){
+  const fileInputRef = useRef(null);
+  const cameraInputRef = useRef(null);
+  const [busy, setBusy] = useState(false);
+
+  const handleFiles = async (files) => {
+    if(!files || !files[0]) return;
+    setBusy(true);
+    try{
+      const dataUrl = await compressImage(files[0], 900);
+      onCapture(dataUrl);
+    }catch(e){
+      toast('写真の読み込みに失敗しました。もう一度お試しください');
+    }
+    setBusy(false);
+  };
+
+  const tryCamera = async () => {
+    if(navigator.mediaDevices && navigator.mediaDevices.getUserMedia){
+      try{
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        stream.getTracks().forEach(t => t.stop());
+        cameraInputRef.current.click();
+      }catch(e){
+        toast('カメラが使えないため、写真を選ぶ画面に切り替わります');
+        setTimeout(() => fileInputRef.current.click(), 900);
+      }
+    }else{
+      toast('カメラが使えないため、写真を選ぶ画面に切り替わります');
+      setTimeout(() => fileInputRef.current.click(), 900);
+    }
+  };
+
+  return (
+    <div>
+      <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={e => handleFiles(e.target.files)} />
+      <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={e => handleFiles(e.target.files)} />
+      <BigButton tone="outline" className="w-full" disabled={busy} onClick={tryCamera}>
+        {busy ? '読み込み中…' : `📷 ${label}`}
+      </BigButton>
+    </div>
+  );
+}
+
+function ChecklistBlock({ items, onToggle, onAdd, onRemove }){
+  const [newItem, setNewItem] = useState('');
+  return (
+    <div className="space-y-2">
+      {items.map(it => (
+        <label key={it.id} className="flex items-center gap-3 bg-white rounded-xl px-3 py-2.5 border" style={{borderColor:'var(--line)'}}>
+          <input type="checkbox" checked={it.checked} onChange={() => onToggle(it.id)} className="w-5 h-5 accent-[--sage]" style={{accentColor:'var(--sage)'}} />
+          <span className={`flex-1 text-sm ${it.checked ? 'line-through text-[--navy]/40' : ''}`}>{it.label}</span>
+          {it.checked && <span className="text-xs font-bold" style={{color:'var(--sage-dark)'}}>済み</span>}
+          <button onClick={() => onRemove(it.id)} className="press text-[--navy]/30 px-1" aria-label="削除">✕</button>
+        </label>
+      ))}
+      <div className="flex gap-2">
+        <input value={newItem} onChange={e=>setNewItem(e.target.value)} placeholder="チェック項目を追加"
+          className="flex-1 rounded-xl border px-3 py-2 text-sm" style={{borderColor:'var(--line)'}} />
+        <button className="press tapbtn rounded-xl px-4 font-bold text-white" style={{backgroundColor:'var(--sage)'}}
+          onClick={() => { if(newItem.trim()){ onAdd(newItem.trim()); setNewItem(''); } }}>追加</button>
+      </div>
+    </div>
+  );
+}
+
+function CardEditor({ card, onChange, onDelete, toast }){
+  const [open, setOpen] = useState(false);
+  const [nameEdit, setNameEdit] = useState(false);
+  const [nameVal, setNameVal] = useState(card.name);
+
+  const update = (patch) => onChange({ ...card, ...patch });
+
+  return (
+    <div className="bg-white rounded-2xl shadow-sm border" style={{borderColor:'var(--line)'}}>
+      <button className="w-full flex items-center justify-between px-4 py-3 press" onClick={() => setOpen(o=>!o)}>
+        <div className="flex items-center gap-2 text-left">
+          <span className="text-xl">{card.type==='house' ? '🏠' : '🚗'}</span>
+          <div>
+            <div className="font-bold">{card.name}</div>
+            <div className="text-xs text-[--navy]/50">記録写真 {card.beforePhotos.length}枚・チェック {card.checklist.filter(c=>c.checked).length}/{card.checklist.length}</div>
+          </div>
+        </div>
+        <span className="text-[--navy]/40">{open ? '▲' : '▼'}</span>
+      </button>
+      {open && (
+        <div className="px-4 pb-4 space-y-4 fade-in">
+          <div className="flex items-center gap-2">
+            {nameEdit ? (
+              <>
+                <input value={nameVal} onChange={e=>setNameVal(e.target.value)} className="flex-1 rounded-xl border px-3 py-2 text-sm" style={{borderColor:'var(--line)'}} />
+                <BigButton className="!px-3 !py-2 text-sm" onClick={() => { update({name: nameVal || card.name}); setNameEdit(false); }}>保存</BigButton>
+              </>
+            ) : (
+              <>
+                <span className="text-sm text-[--navy]/60">名前を変える：</span>
+                <button className="press text-sm underline" style={{color:'var(--sage-dark)'}} onClick={()=>setNameEdit(true)}>変更する</button>
+              </>
+            )}
+          </div>
+
+          <div>
+            <p className="font-bold text-sm mb-2">✅ そなえのチェック</p>
+            <ChecklistBlock
+              items={card.checklist}
+              onToggle={(id) => update({ checklist: card.checklist.map(c => c.id===id ? {...c, checked:!c.checked} : c) })}
+              onAdd={(label) => update({ checklist: [...card.checklist, {id:uid(), label, checked:false}] })}
+              onRemove={(id) => update({ checklist: card.checklist.filter(c=>c.id!==id) })}
+            />
+          </div>
+
+          <div>
+            <p className="font-bold text-sm mb-2">📸 無事な今の記録（ビフォー写真）</p>
+            <div className="flex gap-2 overflow-x-auto pb-1 mb-2">
+              {card.beforePhotos.map(p => (
+                <PhotoThumb key={p.id} photo={p} onRemove={() => update({ beforePhotos: card.beforePhotos.filter(x=>x.id!==p.id) })} />
+              ))}
+            </div>
+            <CapturePhotoButton
+              label="写真をとる・えらぶ"
+              toast={toast}
+              onCapture={(dataUrl) => update({ beforePhotos: [...card.beforePhotos, { id: uid(), dataUrl, date: todayISO() }] })}
+            />
+          </div>
+
+          <BigButton tone="ghost" onClick={() => { if(confirm(`「${card.name}」を削除しますか？写真も消えます`)) onDelete(); }}>このカードを削除する</BigButton>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HomeView({ data, setData, toast }){
+  const addCard = (type) => {
+    const checklist = (type==='house' ? HOUSE_CHECKLIST_DEFAULT : CAR_CHECKLIST_DEFAULT).map(label => ({id:uid(), label, checked:false}));
+    const card = { id: uid(), type, name: type==='house' ? '我が家' : 'マイカー', checklist, beforePhotos: [], afterPhotos: [] };
+    setData(d => ({ ...d, cards: [...d.cards, card] }));
+  };
+  const houseCards = data.cards.filter(c=>c.type==='house');
+  const carCards = data.cards.filter(c=>c.type==='car');
+
+  return (
+    <div className="px-4 pt-4 pb-6 space-y-6 fade-in">
+      <div className="rounded-2xl p-4 text-white" style={{backgroundColor:'var(--sage-dark)'}}>
+        <p className="font-bold text-lg">今日も、そなえの積み重ね</p>
+        <p className="text-sm opacity-90 mt-1">無事な「いえ」と「くるま」の様子を、今のうちに残しておきましょう。</p>
+      </div>
+
+      <section>
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="font-bold text-lg">🏠 いえ</h2>
+          <button className="press tapbtn rounded-full px-4 py-2 text-sm font-bold text-white" style={{backgroundColor:'var(--sage)'}} onClick={()=>addCard('house')}>＋ 追加する</button>
+        </div>
+        <div className="space-y-3">
+          {houseCards.length===0 && <p className="text-sm text-[--navy]/50 px-1">まだ登録がありません。「＋ 追加する」から始めましょう。</p>}
+          {houseCards.map(c => (
+            <CardEditor key={c.id} card={c} toast={toast}
+              onChange={(nc) => setData(d => ({...d, cards: d.cards.map(x=>x.id===nc.id?nc:x)}))}
+              onDelete={() => setData(d => ({...d, cards: d.cards.filter(x=>x.id!==c.id)}))}
+            />
+          ))}
+        </div>
+      </section>
+
+      <section>
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="font-bold text-lg">🚗 くるま</h2>
+          <button className="press tapbtn rounded-full px-4 py-2 text-sm font-bold text-white" style={{backgroundColor:'var(--sage)'}} onClick={()=>addCard('car')}>＋ 追加する</button>
+        </div>
+        <div className="space-y-3">
+          {carCards.length===0 && <p className="text-sm text-[--navy]/50 px-1">まだ登録がありません。「＋ 追加する」から始めましょう。</p>}
+          {carCards.map(c => (
+            <CardEditor key={c.id} card={c} toast={toast}
+              onChange={(nc) => setData(d => ({...d, cards: d.cards.map(x=>x.id===nc.id?nc:x)}))}
+              onDelete={() => setData(d => ({...d, cards: d.cards.filter(x=>x.id!==c.id)}))}
+            />
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+/* ============== 非常時モード ============== */
+const HOUSE_SHOT_GUIDE = ['建物 前から全体','建物 右から全体','建物 左から全体','建物 後ろから全体','こわれた場所（近づいて）','部屋の中のようす','水回り（台所・お風呂）'];
+const CAR_SHOT_GUIDE = ['車 遠くから全体（タイヤが写るように）','水につかった高さがわかる写真','車内の足元（ぬれ具合）','メーターパネル','ナンバープレート'];
+
+function EmergencyShotList({ title, icon, guide, photos, onCapture, onRemove, toast }){
+  return (
+    <div className="bg-white rounded-3xl p-5 shadow border-2" style={{borderColor:'var(--danger)'}}>
+      <h3 className="text-2xl font-black mb-3 flex items-center gap-2" style={{color:'var(--danger)'}}>{icon} {title}</h3>
+      <ul className="space-y-2 mb-4">
+        {guide.map((g,i) => (
+          <li key={i} className="text-lg font-bold flex items-start gap-2">
+            <span style={{color:'var(--amber)'}}>●</span><span>{g}</span>
+          </li>
+        ))}
+      </ul>
+      <div className="flex gap-2 overflow-x-auto pb-2 mb-3">
+        {photos.map(p => <PhotoThumb key={p.id} photo={p} onRemove={()=>onRemove(p.id)} />)}
+      </div>
+      <CapturePhotoButton label="今すぐ撮影する" toast={toast} onCapture={onCapture} />
+    </div>
+  );
+}
+
+function EmergencyView({ data, setData, toast }){
+  const [target, setTarget] = useState(null); // card id selected for shooting
+  const [showFloodAlert, setShowFloodAlert] = useState(false);
+  const [mode, setMode] = useState(null); // 'house' | 'car'
+
+  const cardsOfType = (type) => data.cards.filter(c=>c.type===type);
+
+  const updateCard = (card) => setData(d => ({...d, cards: d.cards.map(x=>x.id===card.id?card:x)}));
+
+  if(!mode){
+    return (
+      <div className="px-4 pt-4 pb-8 space-y-5 fade-in">
+        <div className="rounded-3xl p-5 text-white text-center" style={{backgroundColor:'var(--danger)'}}>
+          <p className="text-3xl font-black mb-1">⚠️ きんきゅう モード</p>
+          <p className="text-lg font-bold">落ち着いて、写真をとりましょう</p>
+        </div>
+        <p className="text-center text-lg font-bold">※ 片付ける前に撮影してください</p>
+        <p className="text-center text-base" style={{color:'var(--navy)'}}>メジャーや人と一緒に写すと、大きさが伝わりやすくなります</p>
+        <div className="grid grid-cols-1 gap-4 max-w-md mx-auto">
+          <button className="press tapbtn bg-white rounded-3xl p-6 shadow border-2 text-2xl font-black" style={{borderColor:'var(--danger)'}} onClick={()=>setMode('house')}>🏠 いえ を撮影する</button>
+          <button className="press tapbtn bg-white rounded-3xl p-6 shadow border-2 text-2xl font-black" style={{borderColor:'var(--danger)'}} onClick={()=>{ setMode('car'); setShowFloodAlert(true); }}>🚗 くるま を撮影する</button>
+        </div>
+        <Modal open={showFloodAlert} onClose={()=>setShowFloodAlert(false)} title="⚠️ さいしょに ご確認ください">
+          <div className="space-y-3">
+            <p className="text-xl font-black text-center" style={{color:'var(--danger)'}}>水に浸かった車は<br/>絶対にエンジンをかけないでください！</p>
+            <p className="text-center font-bold">感電・火災の危険があります</p>
+            <BigButton tone="danger" className="w-full" onClick={()=>setShowFloodAlert(false)}>わかりました</BigButton>
+          </div>
+        </Modal>
+      </div>
+    );
+  }
+
+  const list = cardsOfType(mode);
+  const selectedCard = list.find(c=>c.id===target);
+
+  return (
+    <div className="px-4 pt-4 pb-8 space-y-5 fade-in">
+      <button className="press text-lg font-bold" style={{color:'var(--danger)'}} onClick={()=>{setMode(null); setTarget(null);}}>← もどる</button>
+      {!selectedCard ? (
+        <>
+          <h2 className="text-2xl font-black" style={{color:'var(--danger)'}}>どの{mode==='house'?'いえ':'くるま'}を撮りますか？</h2>
+          {list.length===0 && <p className="font-bold text-lg">先に「ホーム」画面でカードを追加してください</p>}
+          <div className="space-y-3">
+            {list.map(c => (
+              <button key={c.id} className="press tapbtn w-full bg-white rounded-2xl p-4 shadow text-xl font-black text-left border-2" style={{borderColor:'var(--danger)'}} onClick={()=>setTarget(c.id)}>
+                {mode==='house'?'🏠':'🚗'} {c.name}
+              </button>
+            ))}
+          </div>
+        </>
+      ) : (
+        <EmergencyShotList
+          title={selectedCard.name}
+          icon={mode==='house' ? '🏠' : '🚗'}
+          guide={mode==='house' ? HOUSE_SHOT_GUIDE : CAR_SHOT_GUIDE}
+          photos={selectedCard.afterPhotos}
+          toast={toast}
+          onCapture={(dataUrl) => updateCard({...selectedCard, afterPhotos:[...selectedCard.afterPhotos, {id:uid(), dataUrl, date: todayISO()}]})}
+          onRemove={(id) => updateCard({...selectedCard, afterPhotos: selectedCard.afterPhotos.filter(p=>p.id!==id)})}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ============== まとめ・提出 ============== */
+function SummaryView({ data, toast }){
+  const [showPrintGuide, setShowPrintGuide] = useState(false);
+  return (
+    <div className="px-4 pt-4 pb-8 space-y-5 fade-in">
+      <div className="no-print rounded-2xl p-4" style={{backgroundColor:'var(--sage)'}}>
+        <p className="text-white font-bold">罹災証明などの手続きに、記録をまとめて使えます</p>
+      </div>
+      <p className="no-print text-xs text-[--navy]/60">※各自治体や保険会社によって必要項目や提出方法が変わる場合があります。事前にご案内・申請要領をご確認ください。</p>
+
+      <div className="print-page bg-white rounded-2xl p-4 shadow space-y-6">
+        <h2 className="text-xl font-bold text-center">ソナエログ 記録一覧</h2>
+        <p className="text-center text-xs text-[--navy]/60">出力日：{fmtDateJP(todayISO())}</p>
+        {data.cards.length===0 && <p className="text-center text-sm text-[--navy]/50">まだ記録がありません</p>}
+        {data.cards.map(c => (
+          <div key={c.id} className="border-t pt-4" style={{borderColor:'var(--line)'}}>
+            <h3 className="font-bold mb-2">{c.type==='house'?'🏠':'🚗'} {c.name}</h3>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <p className="text-xs font-bold mb-1" style={{color:'var(--sage-dark)'}}>ビフォー（無事な時）</p>
+                <div className="flex flex-wrap gap-1">
+                  {c.beforePhotos.map(p => <img key={p.id} src={p.dataUrl} className="w-16 h-16 object-cover rounded-lg border" style={{borderColor:'var(--line)'}} />)}
+                  {c.beforePhotos.length===0 && <p className="text-xs text-[--navy]/40">写真なし</p>}
+                </div>
+              </div>
+              <div>
+                <p className="text-xs font-bold mb-1" style={{color:'var(--danger)'}}>アフター（被災時）</p>
+                <div className="flex flex-wrap gap-1">
+                  {c.afterPhotos.map(p => <img key={p.id} src={p.dataUrl} className="w-16 h-16 object-cover rounded-lg border" style={{borderColor:'var(--line)'}} />)}
+                  {c.afterPhotos.length===0 && <p className="text-xs text-[--navy]/40">写真なし</p>}
+                </div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="no-print grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <BigButton className="w-full" onClick={() => window.print()}>🖨️ 印刷する・PDFにする</BigButton>
+        <BigButton tone="outline" className="w-full" onClick={() => setShowPrintGuide(true)}>🏪 コンビニで印刷する方法</BigButton>
+      </div>
+
+      <Modal open={showPrintGuide} onClose={()=>setShowPrintGuide(false)} title="コンビニでの印刷方法" wide>
+        <div className="space-y-3 text-sm leading-relaxed">
+          <p className="font-bold">① まず「印刷する・PDFにする」ボタンを押し、「PDFとして保存」を選んでください。</p>
+          <p className="font-bold">② 保存したPDFファイルを、スマホの写真アプリやファイルアプリに入れておきます。</p>
+          <p className="font-bold">③ セブン-イレブンなら「かんたんnetprint」アプリ、ローソン・ファミリーマートなら「PrintSmash」アプリを開き、そのPDFを選んで送信します。</p>
+          <p className="font-bold">④ 表示された番号を、お店のコピー機に入力すれば印刷できます。</p>
+          <BigButton className="w-full" onClick={()=>setShowPrintGuide(false)}>わかりました</BigButton>
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
+/* ============== でんわ ============== */
+const PHONE_LIST = [
+  { label:'警察', num:'110', icon:'🚓', note:'事件・事故のとき' },
+  { label:'消防・救急', num:'119', icon:'🚒', note:'火事・急病のとき' },
+  { label:'海上保安庁', num:'118', icon:'⚓', note:'海の事故のとき' },
+  { label:'JAFロードサービス', num:'#8139', icon:'🚙', note:'車のトラブルのとき' },
+  { label:'救急安心センター', num:'#7119', icon:'☎️', note:'救急車を呼ぶか迷ったとき' },
+];
+function PhoneView(){
+  return (
+    <div className="px-4 pt-4 pb-8 space-y-3 fade-in">
+      <div className="rounded-2xl p-4 text-white text-center" style={{backgroundColor:'var(--navy)'}}>
+        <p className="font-bold text-lg">いざという時の電話番号</p>
+        <p className="text-sm opacity-90">タップするだけで電話がかけられます</p>
+      </div>
+      {PHONE_LIST.map(p => (
+        <a key={p.num} href={`tel:${p.num.replace('#','%23')}`} className="press tapbtn flex items-center justify-between bg-white rounded-2xl p-4 shadow border" style={{borderColor:'var(--line)'}}>
+          <div className="flex items-center gap-3">
+            <span className="text-3xl">{p.icon}</span>
+            <div>
+              <div className="font-bold text-lg">{p.label}</div>
+              <div className="text-xs text-[--navy]/50">{p.note}</div>
+            </div>
+          </div>
+          <div className="text-xl font-black" style={{color:'var(--sage-dark)'}}>{p.num}</div>
+        </a>
+      ))}
+    </div>
+  );
+}
+
+/* ============== せってい ============== */
+function SettingsView({ data, setData, toast, onChangePin, onResetPin }){
+  const fileRef = useRef(null);
+  const [addLabel, setAddLabel] = useState('');
+  const [addDate, setAddDate] = useState('');
+
+  const toggleReminder = (id) => setData(d => ({...d, reminders: d.reminders.map(r => r.id===id ? {...r, enabled:!r.enabled} : r)}));
+  const removeReminder = (id) => setData(d => ({...d, reminders: d.reminders.filter(r=>r.id!==id)}));
+  const addReminder = () => {
+    if(!addLabel.trim() || !addDate) return;
+    const md = addDate.slice(5); // MM-DD from YYYY-MM-DD
+    setData(d => ({...d, reminders:[...d.reminders, {id:uid(), label:addLabel.trim(), date: md, monthly:false, enabled:true, builtin:false}]}));
+    setAddLabel(''); setAddDate('');
+  };
+
+  const exportData = () => {
+    const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `ソナエログ_おまもりデータ_${todayISO()}.json`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast('データを保存しました');
+  };
+  const importData = (file) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try{
+        const parsed = JSON.parse(e.target.result);
+        if(!parsed || typeof parsed !== 'object') throw new Error('bad');
+        setData(d => ({ ...defaultData(), ...parsed }));
+        toast('データを読み込みました');
+      }catch(err){
+        toast('読み込みに失敗しました。正しいファイルかご確認ください');
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  return (
+    <div className="px-4 pt-4 pb-8 space-y-6 fade-in">
+      <h2 className="text-xl font-bold">せってい</h2>
+
+      <section className="bg-white rounded-2xl p-4 shadow space-y-3">
+        <p className="font-bold">🔔 点検日のお知らせ</p>
+        <p className="text-xs text-[--navy]/50">この日になると「点検日です」とお知らせします</p>
+        <div className="space-y-2">
+          {data.reminders.map(r => (
+            <div key={r.id} className="flex items-center justify-between bg-[--sand] rounded-xl px-3 py-2" style={{backgroundColor:'var(--sand)'}}>
+              <div>
+                <div className="font-bold text-sm">{r.label}</div>
+                <div className="text-xs text-[--navy]/50">{r.monthly ? '毎月1日' : `毎年 ${r.date.replace('-','月')}日`}</div>
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => toggleReminder(r.id)}
+                  className={`press tapbtn w-14 h-8 rounded-full relative transition-colors ${r.enabled ? '' : 'bg-gray-300'}`}
+                  style={{ backgroundColor: r.enabled ? 'var(--sage)' : '#d1d5db' }}
+                >
+                  <span className="absolute top-1 w-6 h-6 rounded-full bg-white shadow transition-all" style={{ left: r.enabled ? '28px' : '4px' }} />
+                </button>
+                {!r.builtin && <button className="press text-[--navy]/30" onClick={()=>removeReminder(r.id)}>✕</button>}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="pt-2 border-t space-y-2" style={{borderColor:'var(--line)'}}>
+          <p className="text-sm font-bold">記念日を追加する（誕生日など）</p>
+          <div className="flex gap-2">
+            <input value={addLabel} onChange={e=>setAddLabel(e.target.value)} placeholder="名前（例：家族の誕生日）" className="flex-1 rounded-xl border px-3 py-2 text-sm" style={{borderColor:'var(--line)'}} />
+          </div>
+          <div className="flex gap-2">
+            <input type="date" value={addDate} onChange={e=>setAddDate(e.target.value)} className="flex-1 rounded-xl border px-3 py-2 text-sm" style={{borderColor:'var(--line)'}} />
+            <button className="press tapbtn rounded-xl px-4 font-bold text-white" style={{backgroundColor:'var(--sage)'}} onClick={addReminder}>追加</button>
+          </div>
+        </div>
+      </section>
+
+      <section className="bg-white rounded-2xl p-4 shadow space-y-3">
+        <p className="font-bold">🔐 合言葉（ロック番号）</p>
+        <BigButton tone="outline" className="w-full" onClick={onChangePin}>合言葉を変える</BigButton>
+        <BigButton tone="ghost" onClick={onResetPin}>合言葉を忘れた場合はこちら</BigButton>
+      </section>
+
+      <section className="bg-white rounded-2xl p-4 shadow space-y-3">
+        <p className="font-bold">💾 データのお引越し</p>
+        <p className="text-xs text-[--navy]/50">機種変更の前などに、記録をまとめて保存・読み込みできます</p>
+        <BigButton className="w-full" onClick={exportData}>データを保存する（ダウンロード）</BigButton>
+        <input ref={fileRef} type="file" accept="application/json" className="hidden" onChange={e => e.target.files[0] && importData(e.target.files[0])} />
+        <BigButton tone="outline" className="w-full" onClick={()=>fileRef.current.click()}>データを読み込む（復元）</BigButton>
+      </section>
+    </div>
+  );
+}
+
+/* ============== リマインダー判定 ============== */
+function getTodaysReminders(reminders){
+  const now = new Date();
+  const mm = String(now.getMonth()+1).padStart(2,'0');
+  const dd = String(now.getDate()).padStart(2,'0');
+  return reminders.filter(r => {
+    if(!r.enabled) return false;
+    if(r.monthly) return dd === '01';
+    return r.date === `${mm}-${dd}`;
+  });
+}
+
+/* ============== メインアプリ ============== */
+const TABS = [
+  { key:'home', label:'ホーム', icon:'🏠' },
+  { key:'emergency', label:'きんきゅう', icon:'⚠️' },
+  { key:'summary', label:'まとめ', icon:'🗂️' },
+  { key:'phone', label:'でんわ', icon:'☎️' },
+  { key:'settings', label:'せってい', icon:'⚙️' },
+];
+
+function ReminderPopup({ reminders, onClose }){
+  if(!reminders.length) return null;
+  return (
+    <Modal open={true} onClose={onClose} title="『ソナエログ』の点検日です">
+      <div className="space-y-4">
+        <p className="text-base font-bold">『ソナエログ』の点検日です。それぞれの項目について点検しましょう</p>
+        <ul className="text-sm list-disc pl-5 space-y-1">
+          {reminders.map(r => <li key={r.id}>{r.label}</li>)}
+        </ul>
+        <BigButton className="w-full" onClick={onClose}>点検する</BigButton>
+      </div>
+    </Modal>
+  );
+}
+
+function MainApp(){
+  const [data, setDataRaw] = useState(loadData);
+  const [unlocked, setUnlocked] = useState(false);
+  const [tab, setTab] = useState('home');
+  const [toastMsg, setToastMsg] = useState('');
+  const [showReminder, setShowReminder] = useState(false);
+  const [pendingReminders, setPendingReminders] = useState([]);
+  const [changingPin, setChangingPin] = useState(false);
+
+  const setData = useCallback((updater) => {
+    setDataRaw(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      saveData(next);
+      return next;
+    });
+  }, []);
+
+  const toast = (m) => setToastMsg(m);
+
+  useEffect(() => {
+    if(!unlocked) return;
+    const key = 'sonaelog_last_reminder_check';
+    const last = storage.get(key, '');
+    const today = todayISO();
+    const todays = getTodaysReminders(data.reminders);
+    if(todays.length && last !== today){
+      setPendingReminders(todays);
+      setShowReminder(true);
+      storage.set(key, today);
+    }
+  }, [unlocked]);
+
+  if(!unlocked){
+    return (
+      <>
+        <LockScreen data={data} onUnlock={(pin, isSetup) => {
+          if(isSetup){ setData(d => ({...d, pin})); }
+          setUnlocked(true);
+        }} />
+      </>
+    );
+  }
+
+  if(changingPin){
+    return (
+      <div className="min-h-screen flex flex-col justify-center items-center px-6 safe-top safe-bottom" style={{backgroundColor:'var(--sand)'}}>
+        <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow">
+          <p className="font-bold text-center mb-4">新しい合言葉を入力してください</p>
+          <PinPad onSubmit={(v) => { setData(d=>({...d, pin:v})); setChangingPin(false); toast('合言葉を変更しました'); }} />
+          <BigButton tone="ghost" className="w-full mt-3" onClick={()=>setChangingPin(false)}>やめる</BigButton>
+        </div>
+      </div>
+    );
+  }
+
+  const ViewComp = {
+    home: <HomeView data={data} setData={setData} toast={toast} />,
+    emergency: <EmergencyView data={data} setData={setData} toast={toast} />,
+    summary: <SummaryView data={data} toast={toast} />,
+    phone: <PhoneView />,
+    settings: <SettingsView data={data} setData={setData} toast={toast}
+      onChangePin={()=>setChangingPin(true)}
+      onResetPin={()=>{ if(confirm('合言葉をリセットします。次回起動時に新しく設定できます。よろしいですか？')){ setData(d=>({...d, pin:null})); location.reload(); } }}
+    />,
+  }[tab];
+
+  return (
+    <div className="min-h-screen flex flex-col" style={{backgroundColor:'var(--sand)'}}>
+      <InstallBanner />
+      <header className="no-print safe-top sticky top-0 z-40 px-4 py-3 flex items-center gap-3 shadow-sm" style={{backgroundColor:'var(--sage-dark)'}}>
+        <span className="text-2xl">🛡️</span>
+        <div>
+          <h1 className="text-white font-black text-lg leading-tight">ソナエログ</h1>
+          <p className="text-white/70 text-xs leading-tight">そなえあればうれしいアプリ</p>
+        </div>
+      </header>
+
+      <main className="flex-1 max-w-2xl w-full mx-auto">
+        {ViewComp}
+        <AppFooter />
+      </main>
+
+      <nav className="no-print sticky bottom-0 z-40 safe-bottom bg-white border-t grid grid-cols-5" style={{borderColor:'var(--line)'}}>
+        {TABS.map(t => (
+          <button key={t.key} onClick={()=>setTab(t.key)} className={`press tapbtn flex flex-col items-center justify-center py-2 gap-0.5 ${tab===t.key ? 'font-bold' : 'text-[--navy]/50'}`} style={{ color: tab===t.key ? 'var(--sage-dark)' : undefined }}>
+            <span className="text-xl">{t.icon}</span>
+            <span className="text-[10px]">{t.label}</span>
+          </button>
+        ))}
+      </nav>
+
+      {showReminder && <ReminderPopup reminders={pendingReminders} onClose={()=>setShowReminder(false)} />}
+      <Toast message={toastMsg} onDone={()=>setToastMsg('')} />
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<MainApp />);
+
+/* ============== Service Worker 登録 ============== */
+if('serviceWorker' in navigator){
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
+  });
+}
+</script>
+</body>
+</html>
